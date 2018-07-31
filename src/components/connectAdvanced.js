@@ -2,34 +2,13 @@ import hoistStatics from 'hoist-non-react-statics'
 import invariant from 'invariant'
 import { Component, createElement } from 'react'
 import { polyfill } from 'react-lifecycles-compat'
+import shallowEqual from '../utils/shallowEqual'
 
 import Subscription from '../utils/Subscription'
 import { storeShape, subscriptionShape } from '../utils/PropTypes'
 
 let hotReloadingVersion = 0
 function noop() {}
-function makeUpdater(sourceSelector, store) {
-  return function updater(props, prevState) {
-    try {
-      const nextProps = sourceSelector(store.getState(), props)
-      if (nextProps !== prevState.props || prevState.error) {
-        return {
-          shouldComponentUpdate: true,
-          props: nextProps,
-          error: null,
-        }
-      }
-      return {
-        shouldComponentUpdate: false,
-      }
-    } catch (error) {
-      return {
-        shouldComponentUpdate: true,
-        error,
-      }
-    }
-  }
-}
 
 export default function connectAdvanced(
   /*
@@ -88,10 +67,6 @@ export default function connectAdvanced(
     [subscriptionKey]: subscriptionShape,
   }
 
-  function getDerivedStateFromProps(nextProps, prevState) {
-    return prevState.updater(nextProps, prevState)
-  }
-
   return function wrapWithConnect(WrappedComponent) {
     invariant(
       typeof WrappedComponent == 'function',
@@ -124,20 +99,50 @@ export default function connectAdvanced(
 
         this.version = version
         this.renderCount = 0
-        this.store = props[storeKey] || context[storeKey]
+        const store = props[storeKey] || context[storeKey]
         this.propsMode = Boolean(props[storeKey])
         this.setWrappedInstance = this.setWrappedInstance.bind(this)
 
-        invariant(this.store,
+        invariant(store,
           `Could not find "${storeKey}" in either the context or props of ` +
           `"${displayName}". Either wrap the root component in a <Provider>, ` +
           `or explicitly pass "${storeKey}" as a prop to "${displayName}".`
         )
+        const storeState = store.getState()
 
+        const childPropsSelector = this.createChildSelector(store)
         this.state = {
-          updater: this.createUpdater()
+          props,
+          childPropsSelector,
+          childProps: {},
+          store,
+          storeState,
+          error: null,
+        }
+        this.state = {
+          ...this.state,
+          ...Connect.getChildPropsState(props, this.state)
         }
         this.initSubscription()
+      }
+
+      static getChildPropsState(props, state) {
+        try {
+          const nextProps = state.childPropsSelector(state.store.getState(), props)
+          if (nextProps === state.childProps) return null
+          return { childProps: nextProps }
+        } catch (error) {
+          return { error }
+        }
+      }
+
+      static getDerivedStateFromProps(props, state) {
+        if ((connectOptions.pure && shallowEqual(props, state.props)) || state.error) return null
+        const nextChildProps = Connect.getChildPropsState(props, state)
+        return {
+          ...nextChildProps,
+          props
+        }
       }
 
       getChildContext() {
@@ -159,11 +164,14 @@ export default function connectAdvanced(
         // dispatching an action in its componentWillMount, we have to re-run the select and maybe
         // re-render.
         this.subscription.trySubscribe()
-        this.runUpdater()
+        this.updateChildPropsFromReduxStore(false)
       }
 
       shouldComponentUpdate(_, nextState) {
-        return nextState.shouldComponentUpdate
+        if (!connectOptions.pure) {
+          return true
+        }
+        return nextState.childProps !== this.state.childProps || nextState.error
       }
 
       componentWillUnmount() {
@@ -186,17 +194,35 @@ export default function connectAdvanced(
         this.wrappedInstance = ref
       }
 
-      createUpdater() {
-        const sourceSelector = selectorFactory(this.store.dispatch, selectorFactoryOptions)
-        return makeUpdater(sourceSelector, this.store)
+      createChildSelector(store = this.state.store) {
+        return selectorFactory(store.dispatch, selectorFactoryOptions)
       }
 
-      runUpdater(callback = noop) {
+      updateChildPropsFromReduxStore(notify = true) {
         if (this.isUnmounted) {
           return
         }
 
-        this.setState(prevState => prevState.updater(this.props, prevState), callback)
+        this.setState(prevState => {
+          const nextState = this.state.store.getState()
+          if (nextState === prevState.storeState) {
+            return null
+          }
+          const childPropsState = Connect.getChildPropsState(this.props, {
+              ...this.state,
+              storeState: nextState
+            })
+          const ret = {
+            storeState: nextState,
+            ...childPropsState
+          }
+          if (notify && childPropsState === null) {
+            this.notifyNestedSubs()
+          }
+          return ret
+        }, () => {
+          if (notify) this.notifyNestedSubs()
+        })
       }
 
       initSubscription() {
@@ -205,7 +231,7 @@ export default function connectAdvanced(
         // parentSub's source should match where store came from: props vs. context. A component
         // connected to the store via props shouldn't use subscription from context, or vice versa.
         const parentSub = (this.propsMode ? this.props : this.context)[subscriptionKey]
-        this.subscription = new Subscription(this.store, parentSub, this.onStateChange.bind(this))
+        this.subscription = new Subscription(this.state.store, parentSub, this.updateChildPropsFromReduxStore.bind(this))
 
         // `notifyNestedSubs` is duplicated to handle the case where the component is  unmounted in
         // the middle of the notification loop, where `this.subscription` will then be null. An
@@ -214,10 +240,6 @@ export default function connectAdvanced(
         // listeners logic is changed to not call listeners that have been unsubscribed in the
         // middle of the notification loop.
         this.notifyNestedSubs = this.subscription.notifyNestedSubs.bind(this.subscription)
-      }
-
-      onStateChange() {
-        this.runUpdater(this.notifyNestedSubs)
       }
 
       isSubscribed() {
@@ -241,7 +263,7 @@ export default function connectAdvanced(
         if (this.state.error) {
           throw this.state.error
         } else {
-          return createElement(WrappedComponent, this.addExtraProps(this.state.props))
+          return createElement(WrappedComponent, this.addExtraProps(this.state.childProps))
         }
       }
     }
@@ -251,7 +273,7 @@ export default function connectAdvanced(
     Connect.childContextTypes = childContextTypes
     Connect.contextTypes = contextTypes
     Connect.propTypes = contextTypes
-    Connect.getDerivedStateFromProps = getDerivedStateFromProps
+    polyfill(Connect)
 
     if (process.env.NODE_ENV !== 'production') {
       Connect.prototype.componentDidUpdate = function componentDidUpdate() {
@@ -262,7 +284,7 @@ export default function connectAdvanced(
           // If any connected descendants don't hot reload (and resubscribe in the process), their
           // listeners will be lost when we unsubscribe. Unfortunately, by copying over all
           // listeners, this does mean that the old versions of connected descendants will still be
-          // notified of state changes; however, their onStateChange function is a no-op so this
+          // notified of state changes; however, their updateChildPropsFromReduxStore function is a no-op so this
           // isn't a huge deal.
           let oldListeners = [];
 
@@ -276,14 +298,12 @@ export default function connectAdvanced(
             oldListeners.forEach(listener => this.subscription.listeners.subscribe(listener))
           }
 
-          const updater = this.createUpdater()
-          this.setState({updater})
-          this.runUpdater()
+          const childPropsSelector = this.createChildSelector()
+          const childProps = childPropsSelector(this.props, this.state.storeState)
+          this.setState({ childPropsSelector, childProps })
         }
       }
     }
-
-    polyfill(Connect)
 
     return hoistStatics(Connect, WrappedComponent)
   }
