@@ -1,4 +1,4 @@
-import isPlainObject from '../../src/utils/isPlainObject'
+import isPlainObject from '../../src/utils/isPlainObject.js'
 import vm from 'vm'
 
 describe('isPlainObject', () => {

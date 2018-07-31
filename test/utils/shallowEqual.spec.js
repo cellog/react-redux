@@ -1,4 +1,4 @@
-import shallowEqual from '../../src/utils/shallowEqual'
+import shallowEqual from '../../src/utils/shallowEqual.js'
 
 describe('Utils', () => {
   describe('shallowEqual', () => {
