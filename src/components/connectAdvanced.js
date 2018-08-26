@@ -89,7 +89,7 @@ export default function connectAdvanced(
 
     let PureWrapper
 
-    if (withRef) {
+    if (true || withRef) {
       class PureWrapperRef extends Component {
         shouldComponentUpdate(nextProps) {
           return nextProps.derivedProps !== this.props.derivedProps
@@ -138,6 +138,80 @@ export default function connectAdvanced(
     }
 
     const OuterBase = connectOptions.pure ? PureComponent : Component
+
+    function makeDerivedPropsGenerator() {
+      let lastProps
+      let lastState
+      let lastDerivedProps
+      let lastStore
+      let sourceSelector
+      return (state, props, store) => {
+        if ((connectOptions.pure && lastProps === props) && (lastState === state)) {
+          return lastDerivedProps
+        }
+        if (store !== lastStore) {
+          lastStore = store
+          sourceSelector = selectorFactory(store.dispatch, selectorFactoryOptions)
+        }
+        lastProps = props
+        lastState = state
+        const nextProps = sourceSelector(state, props)
+        if (lastDerivedProps === nextProps) {
+          return lastDerivedProps
+        }
+        lastDerivedProps = nextProps
+        return lastDerivedProps
+      }
+    }
+
+    function renderWrappedComponentWithRef(gDP, ref, props, value) {
+      invariant(value,
+        `Could not find "store" in the context of ` +
+        `"${displayName}". Either wrap the root component in a <Provider>, ` +
+        `or pass a custom React context provider to <Provider> and the corresponding ` +
+        `React context consumer to ${displayName} in connect options.`
+      )
+      const { state, store } = value
+      let derivedProps = gDP(state, props, store)
+      if (connectOptions.pure) {
+        return <PureWrapper derivedProps={derivedProps} forwardRef={ref} />
+      }
+
+      return <WrappedComponent {...derivedProps} ref={ref} />
+    }
+
+    let gDP
+    function FunctionalConnect(props, ref) {
+      invariant(!props[storeKey],
+        'Passing redux store in props has been removed and does not do anything. ' +
+        'To use a custom redux store for a single component, ' +
+        'create a custom React context with React.createContext() and pass the Provider to react-redux\'s provider ' +
+        'and the Consumer to this component\'s connect as in <Provider context={context.Provider}></Provider>' +
+        ` and connect(mapState, mapDispatch, undefined, { consumer=context.consumer })(${wrappedComponentName})`
+      )
+      if (!gDP) gDP = makeDerivedPropsGenerator()
+      if (props.unstable_observedBits) {
+        return (
+          <Consumer unstable_observedBits={props.unstable_observedBits}>
+            {renderWrappedComponentWithRef.bind(null, gDP, ref, props)}
+          </Consumer>
+        )
+      }
+      return (
+        <Consumer>
+          {renderWrappedComponentWithRef.bind(null, gDP, ref, props)}
+        </Consumer>
+      )
+    }
+
+
+    FunctionalConnect.WrappedComponent = WrappedComponent
+    FunctionalConnect.displayName = displayName
+
+    const functional = React.forwardRef(FunctionalConnect)
+    functional.displayName = displayName
+    functional.WrappedComponent = WrappedComponent
+    return hoistStatics(functional, WrappedComponent)
 
     class Connect extends OuterBase {
       constructor(props) {
